@@ -1,0 +1,28 @@
+# Environments
+.venv/
+venv/
+env/
+.env
+backend/app/.env
+
+# Node.js
+node_modules/
+dist/
+.svelte-kit/
+.next/
+out/
+
+# Python Cache
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache/
+.ipynb_checkpoints/
+
+# Local Data / DB Caches
+backend/data/
+
+# OS specific
+.DS_Store
+Thumbs.db
