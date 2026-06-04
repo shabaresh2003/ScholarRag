@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react';
+import ReactMarkdown from 'react-markdown';
 
 export default function App() {
   const [documents, setDocuments] = useState([]);
@@ -129,7 +130,7 @@ export default function App() {
     setIsGenerating(true);
 
     try {
-      const res = await fetch(`${API_BASE}/chat/stream`, {
+      const res = await fetch(`${API_BASE}/chat`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -144,92 +145,24 @@ export default function App() {
         throw new Error(`Server returned ${res.status}`);
       }
 
-      const reader = res.body.getReader();
-      const decoder = new TextDecoder();
-      let buffer = '';
-
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-
-        buffer += decoder.decode(value, { stream: true });
-        const events = buffer.split('\n\n');
-        buffer = events.pop() || ''; // Save incomplete event to buffer
-
-        for (const rawEvent of events) {
-          if (!rawEvent.trim()) continue;
-
-          const lines = rawEvent.split('\n');
-          let eventType = '';
-          let eventData = null;
-
-          for (const line of lines) {
-            if (line.startsWith('event:')) {
-              eventType = line.slice(6).trim();
-            } else if (line.startsWith('data:')) {
-              try {
-                eventData = JSON.parse(line.slice(5).trim());
-              } catch (err) {
-                console.error('Failed to parse SSE event data:', err);
-              }
-            }
-          }
-
-          if (!eventType || !eventData) continue;
-
-          // Dispatch event types
-          if (eventType === 'sources') {
-            setMessages((prev) =>
-              prev.map((msg) =>
-                msg.id === assistantMsgId
-                  ? { ...msg, sources: eventData.sources || [] }
-                  : msg
-              )
-            );
-          } else if (eventType === 'text') {
-            setMessages((prev) =>
-              prev.map((msg) =>
-                msg.id === assistantMsgId
-                  ? { ...msg, text: msg.text + eventData.text }
-                  : msg
-              )
-            );
-          } else if (eventType === 'citations') {
-            setMessages((prev) =>
-              prev.map((msg) =>
-                msg.id === assistantMsgId
-                  ? { ...msg, citations: eventData.citations || [] }
-                  : msg
-              )
-            );
-          } else if (eventType === 'error') {
-            setMessages((prev) =>
-              prev.map((msg) =>
-                msg.id === assistantMsgId
-                  ? { ...msg, text: `Error: ${eventData.error}`, isStreaming: false }
-                  : msg
-              )
-            );
-          }
-        }
-      }
-
-      // Close stream successfully
+      const data = await res.json(); // returns CitationResponse schema
+      
       setMessages((prev) =>
-        prev.map((msg) => {
-          if (msg.id === assistantMsgId) {
-            const finalDocName = selectedPaper ? selectedPaper : "papers";
-            const fallbackText = msg.text.trim() 
-              ? msg.text 
-              : `No response received from the assistant. This usually happens if the server reloaded during your request or the API keys/quotas are exceeded. Please check the backend server logs.`;
-            return { ...msg, text: fallbackText, isStreaming: false };
-          }
-          return msg;
-        })
+        prev.map((msg) =>
+          msg.id === assistantMsgId
+            ? { 
+                ...msg, 
+                text: data.answer || '', 
+                citations: data.citations || [], 
+                sources: data.sources || [], // The sync endpoint returns sources/citations inside backend run_query
+                isStreaming: false 
+              }
+            : msg
+        )
       );
 
     } catch (err) {
-      console.error('Streaming error:', err);
+      console.error('Chat error:', err);
       setMessages((prev) =>
         prev.map((msg) =>
           msg.id === assistantMsgId
@@ -388,10 +321,37 @@ export default function App() {
                   <p>{msg.text}</p>
                 ) : (
                   <>
-                    <p style={{ whiteSpace: 'pre-wrap' }}>
-                      {renderTextWithCitations(msg.text)}
-                      {msg.isStreaming && <span className="typing-cursor" />}
-                    </p>
+                    <div className="markdown-content">
+                      <ReactMarkdown
+                        components={{
+                          // Intercept text nodes to convert citation labels [1], [2], etc., to styled interactive buttons
+                          p: ({ children }) => {
+                            if (typeof children === 'string') {
+                              return <p>{renderTextWithCitations(children)}</p>;
+                            }
+                            // If children contains elements, process nested string segments
+                            const processed = React.Children.map(children, (child) => {
+                              if (typeof child === 'string') {
+                                return renderTextWithCitations(child);
+                              }
+                              return child;
+                            });
+                            return <p>{processed}</p>;
+                          },
+                          li: ({ children }) => {
+                            const processed = React.Children.map(children, (child) => {
+                              if (typeof child === 'string') {
+                                return renderTextWithCitations(child);
+                              }
+                              return child;
+                            });
+                            return <li>{processed}</li>;
+                          }
+                        }}
+                      >
+                        {msg.text}
+                      </ReactMarkdown>
+                    </div>
 
                     {/* Citations Expandable Section */}
                     {msg.citations && msg.citations.length > 0 && (

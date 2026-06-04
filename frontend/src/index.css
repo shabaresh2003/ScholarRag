@@ -617,3 +617,54 @@ h1, h2, h3, h4, button {
   font-family: monospace;
   font-size: 0.85rem;
 }
+
+/* Beautiful Markdown Typography inside Chat Bubbles */
+.markdown-content {
+  font-size: 0.95rem;
+  line-height: 1.6;
+}
+
+.markdown-content p {
+  margin-bottom: 12px;
+}
+
+.markdown-content p:last-child {
+  margin-bottom: 0;
+}
+
+.markdown-content ul, .markdown-content ol {
+  margin-left: 20px;
+  margin-bottom: 12px;
+}
+
+.markdown-content li {
+  margin-bottom: 6px;
+}
+
+.markdown-content h1, .markdown-content h2, .markdown-content h3 {
+  color: #ffffff;
+  font-weight: 700;
+  margin-top: 16px;
+  margin-bottom: 8px;
+}
+
+.markdown-content h1 { font-size: 1.25rem; }
+.markdown-content h2 { font-size: 1.15rem; }
+.markdown-content h3 { font-size: 1.05rem; }
+
+.markdown-content pre {
+  background-color: rgba(0, 0, 0, 0.3);
+  padding: 12px;
+  border-radius: 8px;
+  overflow-x: auto;
+  margin-bottom: 12px;
+  border: 1px solid var(--border-color);
+}
+
+.markdown-content pre code {
+  background-color: transparent;
+  padding: 0;
+  border-radius: 0;
+  font-size: 0.8rem;
+}
+

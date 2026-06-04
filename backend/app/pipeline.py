@@ -3,7 +3,6 @@ import os
 import re
 import uuid
 from typing import List, Dict, Any, Generator, Optional, Tuple
-import google.generativeai as genai
 from pydantic import BaseModel
 
 from backend.app.config import (
@@ -13,14 +12,35 @@ from backend.app.config import (
     LANGFUSE_SECRET_KEY,
     LANGFUSE_HOST,
     GEMINI_MODEL_NAME,
-    prompt_manager
+    prompt_manager,
+    is_bedrock_configured,
+    get_bedrock_client,
+    BEDROCK_MODEL_ID,
+    is_openai_configured,
+    get_openai_client,
+    OPENAI_MODEL_NAME,
+    VERTEX_CREDENTIALS_PATH
 )
 from backend.app.database import get_db
 from backend.app.schemas import CitationResponse
 
-# Configure Gemini
-if GEMINI_API_KEY:
-    genai.configure(api_key=GEMINI_API_KEY)
+from google import genai
+from google.genai import types
+
+# Configure unified GenAI client with Vertex AI if path config is present
+# Using the test parameters you verified: project='ccme-genai', location='asia-south1', vertexai=True
+if VERTEX_CREDENTIALS_PATH:
+    os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = VERTEX_CREDENTIALS_PATH
+    vertex_client = genai.Client(
+        vertexai=True,
+        project="ccme-genai",
+        location="asia-south1"
+    )
+else:
+    # Fallback to default API key Client
+    vertex_client = genai.Client(api_key=GEMINI_API_KEY) if GEMINI_API_KEY else None
+
+
 
 # ----------------------------------------------------
 # TraceWrapper and SpanWrapper for Langfuse v4 compatibility
@@ -117,6 +137,14 @@ class LocalReranker:
         sorted_docs = sorted(docs, key=lambda x: x["rerank_score"], reverse=True)
         return sorted_docs[:top_n]
 
+def clean_json_string(text: str) -> str:
+    text = text.strip()
+    # Check if text is wrapped in markdown json block
+    match = re.search(r"```(?:json)?\s*([\s\S]*?)\s*```", text)
+    if match:
+        return match.group(1).strip()
+    return text
+
 # ----------------------------------------------------
 # RAG Pipeline Implementation
 # ----------------------------------------------------
@@ -135,6 +163,39 @@ class RAGPipeline:
             self.langfuse = DummyLangfuse()
             
         self.reranker = None
+
+    def transform_query(self, query: str, trace_span) -> str:
+        """Transforms user query using both Query Rewriting and Query Expansion via Gemini."""
+        if not vertex_client:
+            return query
+            
+        system_instruction = (
+            "You are a helpful assistant specialized in search query optimization.\n"
+            "Given a user's question, optimize it to make it highly searchable in a research paper vector database.\n"
+            "1. Rewriting: Rephrase the question to remove conversational filler, fix grammatical errors, and clarify intent.\n"
+            "2. Expansion: Add relevant academic synonyms, technical keywords, and core domain terms (separated by spaces or synonyms terms).\n"
+            "Respond ONLY with the final optimized, expanded search query. Do not include explanations, labels, or introductions."
+        )
+        
+        try:
+            response = vertex_client.models.generate_content(
+                model=GEMINI_MODEL_NAME,
+                contents=f"User Query: {query}",
+                config=types.GenerateContentConfig(
+                    system_instruction=system_instruction,
+                    temperature=0.2,
+                    max_output_tokens=100
+                )
+            )
+            transformed = response.text.strip()
+            if transformed:
+                print(f"Query Transformation: '{query}' -> '{transformed}'")
+                trace_span.update(metadata={"original_query": query, "transformed_query": transformed})
+                return transformed
+        except Exception as e:
+            print(f"Query transformation failed: {e}. Using original query.")
+            
+        return query
 
     def _get_reranker(self):
         if self.reranker is None:
@@ -175,17 +236,23 @@ class RAGPipeline:
                 return self.reranker.rerank(query, docs, top_n)
 
     def run_query(self, query: str, source_filter: Optional[str] = None) -> Tuple[CitationResponse, List[Dict[str, Any]]]:
-        """Runs vector+BM25 search, rerank, and Gemini generation. Fully traced."""
+        """Runs vector+BM25 search, rerank, and LLM (Bedrock or Gemini) generation. Fully traced."""
         trace = self.langfuse.trace(
             name="RAG-Query-Execution",
             input={"query": query, "source_filter": source_filter}
         )
         
-        # 1. Retrieval
+        # 1. Query Transformation (Rewriting + Expansion)
+        with trace.span(name="Query-Transformation") as transform_span:
+            transform_span.update(input={"query": query})
+            search_query = self.transform_query(query, transform_span)
+            transform_span.update(output={"search_query": search_query})
+
+        # 2. Retrieval
         with trace.span(name="Hybrid-Retrieval") as retrieval_span:
-            retrieval_span.update(input={"query": query, "source_filter": source_filter})
+            retrieval_span.update(input={"query": search_query, "source_filter": source_filter})
             db_inst = get_db()
-            raw_docs = db_inst.hybrid_search(query, top_k=20, source_filter=source_filter)
+            raw_docs = db_inst.hybrid_search(search_query, top_k=20, source_filter=source_filter)
             retrieval_span.update(output={"raw_docs_count": len(raw_docs)})
 
         # 2. Reranking
@@ -203,45 +270,118 @@ class RAGPipeline:
             
         user_prompt = user_template.format(query=query, context=context_str)
         
-        # 4. Generate Answer using Gemini with schema enforcement
-        llm_input = [
-            {"role": "user", "parts": [user_prompt]}
-        ]
-        
-        generation = trace.generation(
-            name="Gemini-Citation-Generation",
-            model=GEMINI_MODEL_NAME,
-            model_parameters={"temperature": 0.0, "prompt_version": active_version},
-            input=llm_input
-        )
-        
-        try:
-            model = genai.GenerativeModel(
-                model_name=GEMINI_MODEL_NAME,
-                system_instruction=system_prompt
+        # 4. Generate Answer
+        if is_bedrock_configured():
+            client = get_bedrock_client()
+            generation = trace.generation(
+                name="Bedrock-Citation-Generation",
+                model=BEDROCK_MODEL_ID,
+                model_parameters={"temperature": 0.0, "prompt_version": active_version},
+                input=[
+                    {"role": "user", "content": [{"text": user_prompt}]}
+                ]
             )
-            
-            response = model.generate_content(
-                user_prompt,
-                generation_config=genai.GenerationConfig(
-                    response_mime_type="application/json",
-                    response_schema=CitationResponse,
-                    temperature=0.0
+            try:
+                system_instruction = system_prompt + "\n\nYou MUST return a JSON object containing 'answer' and 'citations' keys conforming to the requested schema. Do not include markdown code block syntax (like ```json) in your response, just the raw JSON."
+                
+                response = client.converse(
+                    modelId=BEDROCK_MODEL_ID,
+                    messages=[
+                        {
+                            "role": "user",
+                            "content": [{"text": user_prompt}]
+                        }
+                    ],
+                    system=[
+                        {"text": system_instruction}
+                    ],
+                    inferenceConfig={
+                        "temperature": 0.0,
+                        "maxTokens": 4096
+                    }
                 )
+                
+                output_text = response['output']['message']['content'][0]['text']
+                cleaned_output = clean_json_string(output_text)
+                generation.update(output=cleaned_output)
+                
+                parsed_response = CitationResponse.model_validate_json(cleaned_output)
+                trace.update(output=parsed_response.model_dump())
+                return parsed_response, reranked_docs
+                
+            except Exception as e:
+                generation.update(output=f"Error: {str(e)}", metadata={"failed": True})
+                trace.update(output=f"Error: {str(e)}")
+                raise e
+        elif is_openai_configured():
+            client = get_openai_client()
+            generation = trace.generation(
+                name="OpenAI-Compatible-Citation-Generation",
+                model=OPENAI_MODEL_NAME,
+                model_parameters={"temperature": 0.0, "prompt_version": active_version},
+                input=[
+                    {"role": "user", "content": user_prompt}
+                ]
             )
-            
-            output_text = response.text
-            generation.update(output=output_text)
-            
-            parsed_response = CitationResponse.model_validate_json(output_text)
-            
-            trace.update(output=parsed_response.model_dump())
-            return parsed_response, reranked_docs
-            
-        except Exception as e:
-            generation.update(output=f"Error: {str(e)}", metadata={"failed": True})
-            trace.update(output=f"Error: {str(e)}")
-            raise e
+            try:
+                system_instruction = system_prompt + "\n\nYou MUST return a JSON object containing 'answer' and 'citations' keys conforming to the requested schema. Do not include markdown code block syntax (like ```json) in your response, just the raw JSON."
+                
+                # Responses API endpoint
+                response = client.responses.create(
+                    model=OPENAI_MODEL_NAME,
+                    input=[
+                        {"role": "system", "content": system_instruction},
+                        {"role": "user", "content": user_prompt}
+                    ]
+                )
+                
+                output_text = response.output_text
+                cleaned_output = clean_json_string(output_text)
+                generation.update(output=cleaned_output)
+                
+                parsed_response = CitationResponse.model_validate_json(cleaned_output)
+                trace.update(output=parsed_response.model_dump())
+                return parsed_response, reranked_docs
+                
+            except Exception as e:
+                generation.update(output=f"Error: {str(e)}", metadata={"failed": True})
+                trace.update(output=f"Error: {str(e)}")
+                raise e
+        else:
+            # Fallback to Gemini
+            llm_input = [
+                {"role": "user", "parts": [user_prompt]}
+            ]
+            generation = trace.generation(
+                name="Gemini-Citation-Generation",
+                model=GEMINI_MODEL_NAME,
+                model_parameters={"temperature": 0.0, "prompt_version": active_version},
+                input=llm_input
+            )
+            try:
+                # Use unified GenAI Client (supports both API Key and Vertex AI)
+                response = vertex_client.models.generate_content(
+                    model=GEMINI_MODEL_NAME,
+                    contents=user_prompt,
+                    config=types.GenerateContentConfig(
+                        system_instruction=system_prompt,
+                        response_mime_type="application/json",
+                        response_schema=CitationResponse,
+                        temperature=0.0
+                    )
+                )
+                
+                output_text = response.text
+                generation.update(output=output_text)
+                
+                parsed_response = CitationResponse.model_validate_json(output_text)
+                trace.update(output=parsed_response.model_dump())
+                return parsed_response, reranked_docs
+                
+            except Exception as e:
+                generation.update(output=f"Error: {str(e)}", metadata={"failed": True})
+                trace.update(output=f"Error: {str(e)}")
+                raise e
     def run_query_stream(self, query: str, source_filter: Optional[str] = None) -> Generator[Dict[str, Any], None, None]:
         """Runs the hybrid RAG query and streams the response incrementally (SSE ready)."""
         trace = self.langfuse.trace(
@@ -251,10 +391,16 @@ class RAGPipeline:
         
         generation = None
         try:
-            # 1. Retrieval
+            # 1. Query Transformation (Rewriting + Expansion)
+            with trace.span(name="Query-Transformation") as transform_span:
+                transform_span.update(input={"query": query})
+                search_query = self.transform_query(query, transform_span)
+                transform_span.update(output={"search_query": search_query})
+
+            # 2. Retrieval
             with trace.span(name="Hybrid-Retrieval") as retrieval_span:
                 db_inst = get_db()
-                raw_docs = db_inst.hybrid_search(query, top_k=20, source_filter=source_filter)
+                raw_docs = db_inst.hybrid_search(search_query, top_k=20, source_filter=source_filter)
                 retrieval_span.update(output={"raw_docs_count": len(raw_docs)})
 
             # 2. Reranking
@@ -278,53 +424,201 @@ class RAGPipeline:
             user_prompt = user_template.format(query=query, context=context_str)
             
             # 4. Generate streaming content
-            generation = trace.generation(
-                name="Gemini-Citation-Streaming",
-                model=GEMINI_MODEL_NAME,
-                model_parameters={"temperature": 0.0, "prompt_version": active_version},
-                input=[{"role": "user", "parts": [user_prompt]}]
-            )
-            
-            model = genai.GenerativeModel(
-                model_name=GEMINI_MODEL_NAME,
-                system_instruction=system_prompt
-            )
-            
-            response_stream = model.generate_content(
-                user_prompt,
-                generation_config=genai.GenerationConfig(
-                    response_mime_type="application/json",
-                    response_schema=CitationResponse,
-                    temperature=0.0
-                ),
-                stream=True
-            )
-            
-            # Read streaming JSON tokens and extract answer text incrementally
-            full_json_str = ""
-            for chunk in extract_streaming_answer(response_stream):
-                yield {
-                    "type": "text",
-                    "text": chunk
-                }
+            if is_bedrock_configured():
+                client = get_bedrock_client()
+                generation = trace.generation(
+                    name="Bedrock-Citation-Streaming",
+                    model=BEDROCK_MODEL_ID,
+                    model_parameters={"temperature": 0.0, "prompt_version": active_version},
+                    input=[
+                        {"role": "user", "content": [{"text": user_prompt}]}
+                    ]
+                )
                 
-            # Once text is fully streamed, let's gather full response to parse citations
-            # We fetch the full text from the generator
-            full_json_str = response_stream.text
-            generation.update(output=full_json_str)
-            
-            # Parse final JSON to extract formal citations
-            try:
-                parsed_json = json.loads(full_json_str)
-                citations = parsed_json.get("citations", [])
-                yield {
-                    "type": "citations",
-                    "citations": citations
-                }
-                trace.update(output=parsed_json)
-            except Exception as parse_err:
-                print(f"Error parsing final streaming JSON: {parse_err}")
-                trace.update(output={"raw": full_json_str, "parse_error": str(parse_err)})
+                system_instruction = system_prompt + "\n\nYou MUST return a JSON object containing 'answer' and 'citations' keys conforming to the requested schema. Do not include markdown code block syntax (like ```json) in your response, just the raw JSON."
+                
+                response = client.converse_stream(
+                    modelId=BEDROCK_MODEL_ID,
+                    messages=[
+                        {
+                            "role": "user",
+                            "content": [{"text": user_prompt}]
+                        }
+                    ],
+                    system=[
+                        {"text": system_instruction}
+                    ],
+                    inferenceConfig={
+                        "temperature": 0.0,
+                        "maxTokens": 4096
+                    }
+                )
+                
+                stream = response.get('stream')
+                if not stream:
+                    raise ValueError("No stream returned from Bedrock client.converse_stream")
+                
+                class TextChunk:
+                    def __init__(self, text: str):
+                        self.text = text
+                
+                class AccumulatingAdapter:
+                    def __init__(self, stream):
+                        self.stream = stream
+                        self.full_text = ""
+                    def __iter__(self):
+                        for event in self.stream:
+                            if 'contentBlockDelta' in event:
+                                t = event['contentBlockDelta']['delta']['text']
+                                self.full_text += t
+                                yield TextChunk(t)
+                                
+                adapter = AccumulatingAdapter(stream)
+                
+                for chunk in extract_streaming_answer(adapter):
+                    yield {
+                        "type": "text",
+                        "text": chunk
+                    }
+                
+                full_json_str = clean_json_string(adapter.full_text)
+                generation.update(output=full_json_str)
+                
+                try:
+                    parsed_json = json.loads(full_json_str)
+                    citations = parsed_json.get("citations", [])
+                    yield {
+                        "type": "citations",
+                        "citations": citations
+                    }
+                    trace.update(output=parsed_json)
+                except Exception as parse_err:
+                    print(f"Error parsing final Bedrock streaming JSON: {parse_err}")
+                    trace.update(output={"raw": full_json_str, "parse_error": str(parse_err)})
+            elif is_openai_configured():
+                client = get_openai_client()
+                generation = trace.generation(
+                    name="OpenAI-Compatible-Citation-Streaming",
+                    model=OPENAI_MODEL_NAME,
+                    model_parameters={"temperature": 0.0, "prompt_version": active_version},
+                    input=[
+                        {"role": "user", "content": user_prompt}
+                    ]
+                )
+                
+                system_instruction = system_prompt + "\n\nYou MUST return a JSON object containing 'answer' and 'citations' keys conforming to the requested schema. Do not include markdown code block syntax (like ```json) in your response, just the raw JSON."
+                
+                # Responses stream API supports streaming
+                # Responses API returns custom iterator where each element has token or output delta.
+                # In Bedrock mantle API, responses stream yield chunks. Let's make an adapter.
+                response_stream = client.responses.create(
+                    model=OPENAI_MODEL_NAME,
+                    input=[
+                        {"role": "system", "content": system_instruction},
+                        {"role": "user", "content": user_prompt}
+                    ],
+                    stream=True
+                )
+                
+                class OpenAIChunk:
+                    def __init__(self, text: str):
+                        self.text = text
+                
+                class OpenAIAccumulatingAdapter:
+                    def __init__(self, stream):
+                        self.stream = stream
+                        self.full_text = ""
+                    def __iter__(self):
+                        for event in self.stream:
+                            # Verify attribute name for chunk text: OpenAI Responses chunk yields object with output_text attribute or chunk.text
+                            # For OpenAI Responses API streaming, it yields chunks where delta can be read.
+                            # Standard openai library with Responses API has `event.text` or `event.delta`
+                            # Let's inspect or fallback gracefully.
+                            t = getattr(event, "text", "") or getattr(event, "output_text", "") or ""
+                            self.full_text += t
+                            yield OpenAIChunk(t)
+                
+                adapter = OpenAIAccumulatingAdapter(response_stream)
+                
+                for chunk in extract_streaming_answer(adapter):
+                    yield {
+                        "type": "text",
+                        "text": chunk
+                    }
+                
+                full_json_str = clean_json_string(adapter.full_text)
+                generation.update(output=full_json_str)
+                
+                try:
+                    parsed_json = json.loads(full_json_str)
+                    citations = parsed_json.get("citations", [])
+                    yield {
+                        "type": "citations",
+                        "citations": citations
+                    }
+                    trace.update(output=parsed_json)
+                except Exception as parse_err:
+                    print(f"Error parsing final OpenAI streaming JSON: {parse_err}")
+                    trace.update(output={"raw": full_json_str, "parse_error": str(parse_err)})
+            else:
+                # Fallback to Gemini
+                generation = trace.generation(
+                    name="Gemini-Citation-Streaming",
+                    model=GEMINI_MODEL_NAME,
+                    model_parameters={"temperature": 0.0, "prompt_version": active_version},
+                    input=[{"role": "user", "parts": [user_prompt]}]
+                )
+                # Use unified GenAI Client for streaming
+                response_stream = vertex_client.models.generate_content_stream(
+                    model=GEMINI_MODEL_NAME,
+                    contents=user_prompt,
+                    config=types.GenerateContentConfig(
+                        system_instruction=system_prompt,
+                        response_mime_type="application/json",
+                        response_schema=CitationResponse,
+                        temperature=0.0
+                    )
+                )
+                
+                # Read streaming JSON tokens and extract answer text incrementally
+                # For google.genai, chunk contains the generated chunk response. Let's make an adapter that extracts text.
+                class GenAIChunk:
+                    def __init__(self, text: str):
+                        self.text = text
+
+                class GenAIStreamAdapter:
+                    def __init__(self, stream):
+                        self.stream = stream
+                        self.full_text = ""
+                    def __iter__(self):
+                        for chunk in self.stream:
+                            t = chunk.text or ""
+                            self.full_text += t
+                            yield GenAIChunk(t)
+
+                adapter = GenAIStreamAdapter(response_stream)
+                
+                for chunk in extract_streaming_answer(adapter):
+                    yield {
+                        "type": "text",
+                        "text": chunk
+                    }
+                    
+                full_json_str = clean_json_string(adapter.full_text)
+                generation.update(output=full_json_str)
+                
+                # Parse final JSON to extract formal citations
+                try:
+                    parsed_json = json.loads(full_json_str)
+                    citations = parsed_json.get("citations", [])
+                    yield {
+                        "type": "citations",
+                        "citations": citations
+                    }
+                    trace.update(output=parsed_json)
+                except Exception as parse_err:
+                    print(f"Error parsing final streaming JSON: {parse_err}")
+                    trace.update(output={"raw": full_json_str, "parse_error": str(parse_err)})
                 
         except Exception as e:
             import traceback

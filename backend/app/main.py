@@ -111,13 +111,17 @@ def delete_document(filename: str):
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
-@app.post("/chat", response_model=CitationResponse)
+@app.post("/chat")
 def chat_endpoint(request: QueryRequest):
-    """Sync chat endpoint that returns structured citations directly."""
+    """Sync chat endpoint that returns structured citations and retrieved sources directly."""
     try:
         pipeline = RAGPipeline()
         answer, sources = pipeline.run_query(request.query, request.source_filter)
-        return answer
+        return {
+            "answer": answer.answer,
+            "citations": [c.model_dump() for c in answer.citations],
+            "sources": sources
+        }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 

@@ -46,7 +46,12 @@ from backend.app.config import (
     LANGFUSE_PUBLIC_KEY,
     LANGFUSE_SECRET_KEY,
     LANGFUSE_HOST,
-    GEMINI_MODEL_NAME
+    GEMINI_MODEL_NAME,
+    is_bedrock_configured,
+    AWS_ACCESS_KEY_ID,
+    AWS_SECRET_ACCESS_KEY,
+    AWS_REGION,
+    BEDROCK_MODEL_ID
 )
 
 # Sample document context to seed database for evaluations
@@ -94,8 +99,8 @@ def prepare_evaluation_db():
         print(f"Mock paper '{MOCK_PAPER_NAME}' is already indexed.")
 
 def run_evaluation():
-    if not GEMINI_API_KEY:
-        print("ERROR: GEMINI_API_KEY environment variable is required to run evaluations.")
+    if not is_bedrock_configured() and not GEMINI_API_KEY:
+        print("ERROR: Either AWS Bedrock credentials or GEMINI_API_KEY must be set to run evaluations.")
         sys.exit(1)
         
     prepare_evaluation_db()
@@ -139,19 +144,38 @@ def run_evaluation():
     }
     dataset = Dataset.from_dict(dataset_dict)
     
-    # Configure RAGAS metrics to use Gemini model
-    print("\nConfiguring RAGAS to use Gemini model...")
-    # Inject Google API key for langchain classes
-    os.environ["GOOGLE_API_KEY"] = GEMINI_API_KEY
-    
-    eval_llm = ChatGoogleGenerativeAI(
-        model=GEMINI_MODEL_NAME, 
-        temperature=0.0,
-        response_mime_type="application/json"
-    )
-    eval_embeddings = GoogleGenerativeAIEmbeddings(
-        model="models/embedding-001"
-    )
+    # Configure RAGAS metrics
+    if is_bedrock_configured():
+        print(f"\nConfiguring RAGAS to use AWS Bedrock model: {BEDROCK_MODEL_ID}...")
+        from langchain_aws import ChatBedrock
+        eval_llm = ChatBedrock(
+            model_id=BEDROCK_MODEL_ID,
+            region_name=AWS_REGION,
+            aws_access_key_id=AWS_ACCESS_KEY_ID,
+            aws_secret_access_key=AWS_SECRET_ACCESS_KEY,
+            model_kwargs={"temperature": 0.0}
+        )
+        if GEMINI_API_KEY:
+            os.environ["GOOGLE_API_KEY"] = GEMINI_API_KEY
+            eval_embeddings = GoogleGenerativeAIEmbeddings(
+                model="models/embedding-001"
+            )
+        else:
+            from langchain_community.embeddings import HuggingFaceEmbeddings
+            eval_embeddings = HuggingFaceEmbeddings(model_name="sentence-transformers/all-MiniLM-L6-v2")
+    else:
+        print("\nConfiguring RAGAS to use Gemini model...")
+        # Inject Google API key for langchain classes
+        os.environ["GOOGLE_API_KEY"] = GEMINI_API_KEY
+        
+        eval_llm = ChatGoogleGenerativeAI(
+            model=GEMINI_MODEL_NAME, 
+            temperature=0.0,
+            response_mime_type="application/json"
+        )
+        eval_embeddings = GoogleGenerativeAIEmbeddings(
+            model="models/embedding-001"
+        )
     
     # Instantiate RAGAS metrics
     faithfulness_metric = Faithfulness(llm=eval_llm)
