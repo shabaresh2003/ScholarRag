@@ -154,7 +154,8 @@ export default function App() {
                 ...msg, 
                 text: data.answer || '', 
                 citations: data.citations || [], 
-                sources: data.sources || [], // The sync endpoint returns sources/citations inside backend run_query
+                sources: data.sources || [], 
+                image_url: data.image_url || null,
                 isStreaming: false 
               }
             : msg
@@ -322,6 +323,15 @@ export default function App() {
                 ) : (
                   <>
                     <div className="markdown-content">
+                      {msg.image_url && (
+                        <div className="message-image-container" style={{ margin: '12px 0', borderRadius: '8px', overflow: 'hidden', border: '1px solid #e2e8f0' }}>
+                          <img 
+                            src={msg.image_url} 
+                            alt="Retrieved Multimodal Context" 
+                            style={{ maxWidth: '100%', maxHeight: '300px', objectFit: 'contain', display: 'block' }} 
+                          />
+                        </div>
+                      )}
                       <ReactMarkdown
                         components={{
                           // Intercept text nodes to convert citation labels [1], [2], etc., to styled interactive buttons

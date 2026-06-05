@@ -26,3 +26,8 @@ backend/data/
 # OS specific
 .DS_Store
 Thumbs.db
+
+# Credentials & secrets
+service.json
+backend/service.json
+

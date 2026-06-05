@@ -116,11 +116,12 @@ def chat_endpoint(request: QueryRequest):
     """Sync chat endpoint that returns structured citations and retrieved sources directly."""
     try:
         pipeline = RAGPipeline()
-        answer, sources = pipeline.run_query(request.query, request.source_filter)
+        answer, sources, image_url = pipeline.run_query(request.query, request.source_filter)
         return {
             "answer": answer.answer,
             "citations": [c.model_dump() for c in answer.citations],
-            "sources": sources
+            "sources": sources,
+            "image_url": image_url
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))

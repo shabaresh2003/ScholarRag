@@ -63,6 +63,10 @@ AWS_SECRET_ACCESS_KEY = os.getenv("AWS_SECRET_ACCESS_KEY")
 AWS_REGION = os.getenv("AWS_REGION", "us-east-1")
 BEDROCK_MODEL_ID = os.getenv("BEDROCK_MODEL_ID", "amazon.nova-2-lite-v1:0")
 
+# AWS S3 settings for RAG image ingestion
+AWS_S3_BUCKET_NAME = os.getenv("AWS_S3_BUCKET_NAME", "scholar-rag-images")
+
+
 # OpenAI compatible Bedrock endpoint settings
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 OPENAI_BASE_URL = os.getenv("OPENAI_BASE_URL")

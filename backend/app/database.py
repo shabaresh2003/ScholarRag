@@ -81,7 +81,8 @@ class PineconeDatabase:
                         "id": doc_id,
                         "text": chunk["text"],
                         "source": filename,
-                        "pages": chunk["pages"]
+                        "pages": chunk["pages"],
+                        "image_url": chunk.get("image_url")
                     }
                     self.bm25_docs.append(doc_dict)
                     tokenized_corpus.append(tokenize_text(chunk["text"]))
@@ -112,15 +113,20 @@ class PineconeDatabase:
                 for idx, chunk in enumerate(chunks):
                     chunk_id = f"{filename}_{idx}"
                     emb = self.emb_model.encode(chunk["text"]).tolist()
+                    metadata = {
+                        "source": filename,
+                        "text": chunk["text"],
+                        "pages": json.dumps(chunk["pages"]),
+                        "chunk_idx": idx
+                    }
+                    # Include image_url in metadata if present
+                    if chunk.get("image_url"):
+                        metadata["image_url"] = chunk["image_url"]
+
                     vectors.append({
                         "id": chunk_id,
                         "values": emb,
-                        "metadata": {
-                            "source": filename,
-                            "text": chunk["text"],
-                            "pages": json.dumps(chunk["pages"]),
-                            "chunk_idx": idx
-                        }
+                        "metadata": metadata
                     })
                 
                 # Batch upsert in sizes of 100
@@ -188,6 +194,7 @@ class PineconeDatabase:
                         "text": meta.get("text", ""),
                         "source": meta.get("source", "unknown"),
                         "pages": pages,
+                        "image_url": meta.get("image_url"),
                         "vector_score": float(match["score"])
                     })
             except Exception as e:

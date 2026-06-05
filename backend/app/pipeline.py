@@ -264,21 +264,48 @@ class RAGPipeline:
         # 3. Formulate Prompt
         active_version, system_prompt, user_template = prompt_manager.get_prompt()
         
+        # Check for image URL in retrieved documents and download bytes for multimodality
+        image_url = next((doc.get("image_url") for doc in reranked_docs if doc.get("image_url")), None)
+        image_bytes = None
+        if image_url:
+            import requests
+            try:
+                if image_url.startswith("http"):
+                    resp = requests.get(image_url, timeout=5)
+                    if resp.status_code == 200:
+                        image_bytes = resp.content
+            except Exception as e:
+                print(f"Failed to fetch image from {image_url}: {e}")
+
         context_str = ""
         for idx, doc in enumerate(reranked_docs):
-            context_str += f"Segment [{idx+1}] (Source: {doc['source']}, Pages: {doc['pages']}):\n{doc['text']}\n\n"
+            doc_img_url = doc.get("image_url")
+            if doc_img_url:
+                context_str += f"Segment [{idx+1}] (Source: {doc['source']}, Pages: {doc['pages']}, Image URL: {doc_img_url}):\n{doc['text']}\n\n"
+            else:
+                context_str += f"Segment [{idx+1}] (Source: {doc['source']}, Pages: {doc['pages']}):\n{doc['text']}\n\n"
             
         user_prompt = user_template.format(query=query, context=context_str)
         
         # 4. Generate Answer
         if is_bedrock_configured():
             client = get_bedrock_client()
+            content_list = [{"text": user_prompt}]
+            if image_bytes:
+                content_list.insert(0, {
+                    "image": {
+                        "format": "png",
+                        "source": {
+                            "bytes": image_bytes
+                        }
+                    }
+                })
             generation = trace.generation(
                 name="Bedrock-Citation-Generation",
                 model=BEDROCK_MODEL_ID,
                 model_parameters={"temperature": 0.0, "prompt_version": active_version},
                 input=[
-                    {"role": "user", "content": [{"text": user_prompt}]}
+                    {"role": "user", "content": content_list}
                 ]
             )
             try:
@@ -289,7 +316,7 @@ class RAGPipeline:
                     messages=[
                         {
                             "role": "user",
-                            "content": [{"text": user_prompt}]
+                            "content": content_list
                         }
                     ],
                     system=[
@@ -307,7 +334,7 @@ class RAGPipeline:
                 
                 parsed_response = CitationResponse.model_validate_json(cleaned_output)
                 trace.update(output=parsed_response.model_dump())
-                return parsed_response, reranked_docs
+                return parsed_response, reranked_docs, image_url
                 
             except Exception as e:
                 generation.update(output=f"Error: {str(e)}", metadata={"failed": True})
@@ -341,7 +368,7 @@ class RAGPipeline:
                 
                 parsed_response = CitationResponse.model_validate_json(cleaned_output)
                 trace.update(output=parsed_response.model_dump())
-                return parsed_response, reranked_docs
+                return parsed_response, reranked_docs, image_url
                 
             except Exception as e:
                 generation.update(output=f"Error: {str(e)}", metadata={"failed": True})
@@ -349,8 +376,15 @@ class RAGPipeline:
                 raise e
         else:
             # Fallback to Gemini
+            contents = [user_prompt]
+            if image_bytes:
+                image_part = types.Part.from_bytes(
+                    data=image_bytes,
+                    mime_type="image/png"
+                )
+                contents = [image_part, user_prompt]
             llm_input = [
-                {"role": "user", "parts": [user_prompt]}
+                {"role": "user", "parts": contents}
             ]
             generation = trace.generation(
                 name="Gemini-Citation-Generation",
@@ -362,7 +396,7 @@ class RAGPipeline:
                 # Use unified GenAI Client (supports both API Key and Vertex AI)
                 response = vertex_client.models.generate_content(
                     model=GEMINI_MODEL_NAME,
-                    contents=user_prompt,
+                    contents=contents,
                     config=types.GenerateContentConfig(
                         system_instruction=system_prompt,
                         response_mime_type="application/json",
@@ -376,7 +410,7 @@ class RAGPipeline:
                 
                 parsed_response = CitationResponse.model_validate_json(output_text)
                 trace.update(output=parsed_response.model_dump())
-                return parsed_response, reranked_docs
+                return parsed_response, reranked_docs, image_url
                 
             except Exception as e:
                 generation.update(output=f"Error: {str(e)}", metadata={"failed": True})
@@ -408,10 +442,24 @@ class RAGPipeline:
                 reranked_docs = self.rerank_docs(query, raw_docs, top_n=5)
                 rerank_span.update(output={"reranked_docs_count": len(reranked_docs)})
 
+            # Check for image URL in retrieved documents and download bytes for multimodality
+            image_url = next((doc.get("image_url") for doc in reranked_docs if doc.get("image_url")), None)
+            image_bytes = None
+            if image_url:
+                import requests
+                try:
+                    if image_url.startswith("http"):
+                        resp = requests.get(image_url, timeout=5)
+                        if resp.status_code == 200:
+                            image_bytes = resp.content
+                except Exception as e:
+                    print(f"Failed to fetch image from {image_url}: {e}")
+
             # Stream documents list first to frontend so it can display references immediately
             yield {
                 "type": "sources",
-                "sources": reranked_docs
+                "sources": reranked_docs,
+                "image_url": image_url
             }
 
             # 3. Formulate Prompt
@@ -419,19 +467,33 @@ class RAGPipeline:
             
             context_str = ""
             for idx, doc in enumerate(reranked_docs):
-                context_str += f"Segment [{idx+1}] (Source: {doc['source']}, Pages: {doc['pages']}):\n{doc['text']}\n\n"
+                doc_img_url = doc.get("image_url")
+                if doc_img_url:
+                    context_str += f"Segment [{idx+1}] (Source: {doc['source']}, Pages: {doc['pages']}, Image URL: {doc_img_url}):\n{doc['text']}\n\n"
+                else:
+                    context_str += f"Segment [{idx+1}] (Source: {doc['source']}, Pages: {doc['pages']}):\n{doc['text']}\n\n"
                 
             user_prompt = user_template.format(query=query, context=context_str)
             
             # 4. Generate streaming content
             if is_bedrock_configured():
                 client = get_bedrock_client()
+                content_list = [{"text": user_prompt}]
+                if image_bytes:
+                    content_list.insert(0, {
+                        "image": {
+                            "format": "png",
+                            "source": {
+                                "bytes": image_bytes
+                            }
+                        }
+                    })
                 generation = trace.generation(
                     name="Bedrock-Citation-Streaming",
                     model=BEDROCK_MODEL_ID,
                     model_parameters={"temperature": 0.0, "prompt_version": active_version},
                     input=[
-                        {"role": "user", "content": [{"text": user_prompt}]}
+                        {"role": "user", "content": content_list}
                     ]
                 )
                 
@@ -442,7 +504,7 @@ class RAGPipeline:
                     messages=[
                         {
                             "role": "user",
-                            "content": [{"text": user_prompt}]
+                            "content": content_list
                         }
                     ],
                     system=[
@@ -562,16 +624,26 @@ class RAGPipeline:
                     trace.update(output={"raw": full_json_str, "parse_error": str(parse_err)})
             else:
                 # Fallback to Gemini
+                contents = [user_prompt]
+                if image_bytes:
+                    image_part = types.Part.from_bytes(
+                        data=image_bytes,
+                        mime_type="image/png"
+                    )
+                    contents = [image_part, user_prompt]
+                llm_input = [
+                    {"role": "user", "parts": contents}
+                ]
                 generation = trace.generation(
                     name="Gemini-Citation-Streaming",
                     model=GEMINI_MODEL_NAME,
                     model_parameters={"temperature": 0.0, "prompt_version": active_version},
-                    input=[{"role": "user", "parts": [user_prompt]}]
+                    input=llm_input
                 )
                 # Use unified GenAI Client for streaming
                 response_stream = vertex_client.models.generate_content_stream(
                     model=GEMINI_MODEL_NAME,
-                    contents=user_prompt,
+                    contents=contents,
                     config=types.GenerateContentConfig(
                         system_instruction=system_prompt,
                         response_mime_type="application/json",
