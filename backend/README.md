@@ -91,3 +91,13 @@ To ensure the RAG application remains performant and accurate, we integrated **R
     - **Context Recall**: Assesses if the retrieved context contains all ground truth facts.
     - **Context Precision**: Determines if the most relevant context chunks are ranked highest.
 *   **Langfuse Integration**: The evaluation runs are instrumented with the Langfuse Langchain callback handler (`from langfuse.langchain import CallbackHandler`), automatically syncing evaluation metrics, inputs, and outputs to the Langfuse cloud dashboard for regression tracking.
+
+---
+
+## 🖼️ Multimodal Architecture Flow (S3 + Vertex AI)
+
+ScholarRAG utilizes a robust multimodal processing architecture:
+1. **Extraction (PyMuPDF)**: Automatically partitions layouts and extracts inline diagrams as raw images.
+2. **Object Storage (AWS S3)**: Automatically verifies and creates buckets (e.g., `scholar-rag-images`) if missing and uploads diagram objects.
+3. **Summarization (Gemini 2.5 Flash)**: Generates detailed conceptual representations of layout diagrams.
+4. **Retrieval & Presigned Access**: Resolves stored S3 URLs to authenticated S3 presigned URLs on the fly, feeding image bytes to the LLM (for multimodal inference) and yielding the secure URL to the React UI for inline rendering.

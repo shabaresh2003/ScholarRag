@@ -11,6 +11,7 @@ ScholarRAG is a production-level, citation-enforced RAG (Retrieval-Augmented Gen
 *   **Context Reranking**: Re-evaluates context relevance using the Cohere Rerank API (with a local `CrossEncoder` fallback).
 *   **Strict Citation Enforcement**: Gemini outputs a validated JSON schema containing citations (source filename, page numbers, exact quote snippets).
 *   **Streaming SSE Interface**: Progressively streams the generated text in real-time, displaying citations and sources dynamically in the UI.
+*   **Multimodal Ingestion & Retrieval**: Automatically extracts inline diagrams/images from PDFs, uploads them to AWS S3 (creating buckets automatically if missing), runs detailed multimodal summarization via Gemini 2.5 Flash, and retrieves/renders visual diagrams inline in the chat interface.
 *   **Observability & Tracing**: Instruments every phase (retrieval, reranking, generation) to Langfuse.
 *   **RAGAS Evaluation Framework**: Contains a quality evaluation suite that syncs performance scores to Langfuse.
 
@@ -54,6 +55,12 @@ PINECONE_INDEX_NAME="research-papers"
 
 # Optional (falls back to local CrossEncoder if empty)
 COHERE_API_KEY="your-cohere-key"
+
+# AWS Bedrock & S3 Configuration (for Bedrock routing & multimodal image pipeline)
+AWS_ACCESS_KEY_ID="your-aws-access-key"
+AWS_SECRET_ACCESS_KEY="your-aws-secret-key"
+AWS_REGION="us-east-1"
+AWS_S3_BUCKET_NAME="scholar-rag-images"
 
 # Optional (for monitoring & evaluations)
 LANGFUSE_PUBLIC_KEY="pk-lf-..."
