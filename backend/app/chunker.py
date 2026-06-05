@@ -52,6 +52,21 @@ def upload_image_to_s3(image_bytes: bytes, filename: str) -> str:
             aws_access_key_id=AWS_ACCESS_KEY_ID,
             aws_secret_access_key=AWS_SECRET_ACCESS_KEY
         )
+        # Verify if bucket exists, create it if not
+        try:
+            s3.head_bucket(Bucket=AWS_S3_BUCKET_NAME)
+        except Exception:
+            try:
+                if AWS_REGION == "us-east-1":
+                    s3.create_bucket(Bucket=AWS_S3_BUCKET_NAME)
+                else:
+                    s3.create_bucket(
+                        Bucket=AWS_S3_BUCKET_NAME,
+                        CreateBucketConfiguration={"LocationConstraint": AWS_REGION}
+                    )
+            except Exception as create_err:
+                print(f"AWS S3 Bucket auto-creation failed: {create_err}")
+                
         s3.put_object(
             Bucket=AWS_S3_BUCKET_NAME,
             Key=filename,

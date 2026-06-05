@@ -145,6 +145,37 @@ def clean_json_string(text: str) -> str:
         return match.group(1).strip()
     return text
 
+def get_presigned_s3_url(image_url: str) -> str:
+    if not image_url or not ("s3.amazonaws.com" in image_url or ".s3." in image_url):
+        return image_url
+    try:
+        from backend.app.config import (
+            AWS_ACCESS_KEY_ID,
+            AWS_SECRET_ACCESS_KEY,
+            AWS_REGION,
+            AWS_S3_BUCKET_NAME
+        )
+        import boto3
+        if not AWS_ACCESS_KEY_ID or not AWS_SECRET_ACCESS_KEY:
+            return image_url
+            
+        key = image_url.split("/")[-1]
+        s3 = boto3.client(
+            "s3",
+            region_name=AWS_REGION,
+            aws_access_key_id=AWS_ACCESS_KEY_ID,
+            aws_secret_access_key=AWS_SECRET_ACCESS_KEY
+        )
+        presigned = s3.generate_presigned_url(
+            'get_object',
+            Params={'Bucket': AWS_S3_BUCKET_NAME, 'Key': key},
+            ExpiresIn=3600
+        )
+        return presigned
+    except Exception as e:
+        print(f"Failed to generate presigned S3 URL: {e}")
+        return image_url
+
 # ----------------------------------------------------
 # RAG Pipeline Implementation
 # ----------------------------------------------------
@@ -265,7 +296,8 @@ class RAGPipeline:
         active_version, system_prompt, user_template = prompt_manager.get_prompt()
         
         # Check for image URL in retrieved documents and download bytes for multimodality
-        image_url = next((doc.get("image_url") for doc in reranked_docs if doc.get("image_url")), None)
+        raw_image_url = next((doc.get("image_url") for doc in reranked_docs if doc.get("image_url")), None)
+        image_url = get_presigned_s3_url(raw_image_url) if raw_image_url else None
         image_bytes = None
         if image_url:
             import requests
@@ -443,7 +475,8 @@ class RAGPipeline:
                 rerank_span.update(output={"reranked_docs_count": len(reranked_docs)})
 
             # Check for image URL in retrieved documents and download bytes for multimodality
-            image_url = next((doc.get("image_url") for doc in reranked_docs if doc.get("image_url")), None)
+            raw_image_url = next((doc.get("image_url") for doc in reranked_docs if doc.get("image_url")), None)
+            image_url = get_presigned_s3_url(raw_image_url) if raw_image_url else None
             image_bytes = None
             if image_url:
                 import requests
